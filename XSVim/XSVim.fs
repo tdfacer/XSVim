@@ -322,7 +322,7 @@ module VimHelpers =
 
 module Vim =
     let mutable clipboard = ""
-    let defaultState = { keys=[]; mode=NormalMode; visualStartOffset=0; findCharCommand=None; lastAction=[]; desiredColumn=None; undoGroup=None; statusMessage=None }
+    let defaultState = { keys=[]; mode=NormalMode; visualStartOffset=0; findCharCommand=None; lastAction=[]; desiredColumn=None; undoGroup=None; statusMessage=None; markMap=System.Collections.Generic.Dictionary<string,MarkLocation>()}
     let (|VisualModes|_|) = function
         | VisualMode | VisualLineMode | VisualBlockMode -> Some VisualModes
         | _ -> None
@@ -591,6 +591,22 @@ module Vim =
                     editor.InsertAtCaret c
                     EditActions.MoveCaretLeft editor
                     vimState
+                | SetMark c ->
+                    let offset = editor.CaretOffset
+                    if vimState.markMap.ContainsKey c then
+                        vimState.markMap.Remove c |> ignore 
+                    let location = {offset=offset; fileName=editor.FileName.FullPath.ToString(); lineChanged=false}
+                    vimState.markMap.Add (c, location) |> ignore
+                    vimState
+                | GoToMark c ->
+                    if vimState.markMap.ContainsKey c then
+                        let name = (vimState.markMap.Item c).fileName
+                        if IdeApp.Workbench.ActiveDocument.FileName.FullPath.ToString() <> name then
+                            let document = IdeApp.Workbench.GetDocument(name)
+                            let fileInfo = new MonoDevelop.Ide.Gui.FileOpenInformation (document.FileName, document.Project)
+                            IdeApp.Workbench.OpenDocument(fileInfo) |> ignore
+                        editor.CaretOffset <- (vimState.markMap.Item c).offset
+                    vimState
                 | InsertLine Before -> 
                     EditActions.InsertNewLineAtEnd editor
                     vimState
@@ -772,6 +788,11 @@ module Vim =
         | "<esc>" | "<C-c>" | "<C-[>" -> Some Escape
         | _ -> None
 
+    let (|MarkChar|_|) = function
+        | "m" -> Some SetMark
+        | "`" -> Some GoToMark
+        | _ -> None
+
     let wait = [ getCommand None DoNothing Nothing ]
 
     let parseKeys (state:VimState) =
@@ -780,6 +801,7 @@ module Vim =
             match keyList with
             | "r" :: _ -> None, keyList
             | FindChar _ :: _ -> None, keyList
+            | MarkChar _ :: _ -> None, keyList
             // 2dw -> 2, dw
             | OneToNine d1 :: Digit d2 :: Digit d3 :: Digit d4 :: t ->
                 Some (d1 * 1000 + d2 * 100 + d3 * 10 + d4), t
@@ -864,6 +886,8 @@ module Vim =
             | NormalMode, [ "<C-e>" ] -> [ dispatch TextEditorCommands.ScrollLineDown ]
             | NormalMode, [ "r" ] -> wait
             | NormalMode, [ "r"; c ] -> [ run (ReplaceChar c) Nothing ]
+            | NormalMode, [ "m"; c ] -> [ run (SetMark c) Nothing ]
+            | NormalMode, [ "`"; c ] -> [ run (GoToMark c) Nothing ]
             | NotInsertMode, [ Action action; FindChar m; c ] -> [ run action (m c) ]
             | NotInsertMode, [ Action action; "i"; BlockDelimiter c ] -> [ run action (InnerBlock c) ]
             | NotInsertMode, [ Action action; "a"; BlockDelimiter c ] -> [ run action (ABlock c) ]
@@ -886,6 +910,8 @@ module Vim =
             | NotInsertMode, [ FindChar _; ] -> wait
             | NotInsertMode, [ Action _; FindChar _; ] -> wait
             | NotInsertMode, [ "g" ] -> wait
+            | NotInsertMode, [ "m" ] -> wait
+            | NotInsertMode, [ "`" ] -> wait
             | NotInsertMode, [ "g"; "g" ] ->
                 let lineNumber = match numericArgument with Some n -> n | None -> 1
                 [ runOnce Move (StartOfLineNumber lineNumber) ]
@@ -1000,6 +1026,7 @@ type XSVim() =
             disposables <- [ caretChanged; documentClosed ]
 
     override x.KeyPress descriptor =
+        System.Console.WriteLine ("c" + descriptor.KeyChar.ToString())
         match descriptor.ModifierKeys with
         | ModifierKeys.Command -> false
         | _ ->
